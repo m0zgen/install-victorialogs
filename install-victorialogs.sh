@@ -95,7 +95,7 @@ if [[ "${1:-}" == "--uninstall" || "${1:-}" == "-u" ]]; then
 fi
 
 # ==========================================
-# INSTALLATION LOGIC
+# INSTALLATION / UPDATE LOGIC
 # ==========================================
 
 # Check required tools
@@ -131,7 +131,28 @@ fi
 TAG_NAME=$(echo "${RELEASE_JSON}" | jq -r '.tag_name // empty')
 log_info "Latest release version found: ${TAG_NAME}"
 
-# Explicitly filter OUT 'enterprise' assets to get Community Open Source build
+# ------------------------------------------
+# CHECK EXISTING INSTALLATION & VERSION
+# ------------------------------------------
+CURRENT_VERSION=""
+if [[ -f "${BIN_DEST}" ]]; then
+    log_info "Existing installation detected at ${BIN_DEST}"
+    CURRENT_VERSION=$("${BIN_DEST}" -version 2>&1 | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+' | head -n 1 || true)
+    
+    if [[ -n "${CURRENT_VERSION}" ]]; then
+        log_info "Currently installed version: ${CURRENT_VERSION}"
+        if [[ "${CURRENT_VERSION}" == "${TAG_NAME}" ]]; then
+            log_success "VictoriaLogs is already up-to-date (${CURRENT_VERSION}). Nothing to do."
+            exit 0
+        else
+            log_warn "New version available! Upgrading from ${CURRENT_VERSION} to ${TAG_NAME}..."
+        fi
+    else
+        log_warn "Could not determine current version. Proceeding with clean binary update..."
+    fi
+fi
+
+# Filter OUT 'enterprise' assets to get Community Open Source build
 DOWNLOAD_URL=$(echo "${RELEASE_JSON}" | jq -r ".assets[] | select(.name | test(\"victoria-logs-linux-${VL_ARCH}-.*\\\\.tar\\\\.gz$\") and (contains(\"enterprise\") | not)) | .browser_download_url" | head -n 1)
 
 if [[ -z "${DOWNLOAD_URL}" || "${DOWNLOAD_URL}" == "null" ]]; then
@@ -153,6 +174,12 @@ if [[ -z "${BIN_SRC}" ]]; then
     log_error "Binary 'victoria-logs-prod' was not found inside the downloaded archive."
 fi
 
+# Stop service gracefully if running before binary update
+if systemctl is-active --quiet victorialogs 2>/dev/null; then
+    log_info "Stopping active victorialogs service for binary update..."
+    systemctl stop victorialogs
+fi
+
 # System user and directory layout
 log_info "Setting up system user and storage paths..."
 
@@ -171,7 +198,7 @@ chown -R "${SERVICE_USER}:${SERVICE_USER}" "${INSTALL_DIR}" "${DATA_DIR}"
 ln -sf "${BIN_DEST}" "${SYMLINK_PATH}"
 
 # Systemd unit creation
-log_info "Creating systemd unit configuration..."
+log_info "Ensuring systemd unit configuration..."
 
 cat << EOF > "${SERVICE_PATH}"
 [Unit]
@@ -198,7 +225,7 @@ EOF
 chmod 0644 "${SERVICE_PATH}"
 
 # Start and enable service
-log_info "Reloading systemd and enabling victorialogs service..."
+log_info "Reloading systemd and starting victorialogs service..."
 systemctl daemon-reload
 systemctl enable victorialogs
 systemctl restart victorialogs
@@ -207,12 +234,12 @@ systemctl restart victorialogs
 sleep 2
 if systemctl is-active --quiet victorialogs; then
     log_success "=========================================================="
-    log_success " VictoriaLogs ${TAG_NAME} (Community) installed & started!"
+    log_success " VictoriaLogs ${TAG_NAME} (Community) operational!"
     log_success "=========================================================="
     log_info " Web UI / LogsQL interface: http://localhost:9428/select/vmui"
     log_info " Ingestion Endpoint: http://localhost:9428/insert/jsonline"
     log_info " Service status: systemctl status victorialogs"
 else
-    log_warn "Service installed but failed to start cleanly. Check logs:"
+    log_warn "Service installed/updated but failed to start cleanly. Check logs:"
     log_warn "journalctl -u victorialogs -n 50 --no-pager"
 fi
